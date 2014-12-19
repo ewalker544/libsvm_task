@@ -21,6 +21,8 @@
 #include "ThreadPool/TaskPromise.h"
 
 MPITaskPool *TASK_POOL = NULL;
+std::mutex 	SEND_MPI_LOCK;
+std::mutex 	RECV_MPI_LOCK;
 std::unordered_map<svm_node *, int> SVM_NODE_MAP;
 
 int libsvm_version = LIBSVM_VERSION;
@@ -1815,8 +1817,6 @@ static decision_function svm_train_one(
 
 void send_problem(const svm_problem *prob, int rank) 
 {
-	MPI::COMM_WORLD.Send(&prob->l, 1, MPI_INT, rank, 0);
-
 	int *buffer = new int [prob->l];
 	for (int i = 0; i < prob->l; ++i) 
 	{
@@ -1829,9 +1829,12 @@ void send_problem(const svm_problem *prob, int rank)
 		buffer[i] = it->second;
 	}
 
-	MPI::COMM_WORLD.Send(buffer, prob->l, MPI_INT, rank, 0);
-
-	MPI::COMM_WORLD.Send(prob->y, prob->l, MPI_DOUBLE, rank, 0);
+	{
+		std::lock_guard<std::mutex> guard(SEND_MPI_LOCK);
+		MPI::COMM_WORLD.Send(&prob->l, 1, MPI_INT, rank, 0);
+		MPI::COMM_WORLD.Send(buffer, prob->l, MPI_INT, rank, 0);
+		MPI::COMM_WORLD.Send(prob->y, prob->l, MPI_DOUBLE, rank, 0);
+	}
 
 	delete [] buffer;
 }
@@ -1875,8 +1878,6 @@ void send_param(const svm_parameter *param, int rank)
 	intbuf[4] = param->shrinking;
 	intbuf[5] = param->probability;
 
-	MPI::COMM_WORLD.Send(intbuf, 6, MPI_INT, rank, 0);
-
 	// send the doubles
 	double dbuf[7];
 	dbuf[0] = param->gamma;
@@ -1887,11 +1888,15 @@ void send_param(const svm_parameter *param, int rank)
 	dbuf[5] = param->nu;
 	dbuf[6] = param->p;
 
-	MPI::COMM_WORLD.Send(dbuf, 7, MPI_DOUBLE, rank, 0);
+	{
+		std::lock_guard<std::mutex> guard(SEND_MPI_LOCK);
+		MPI::COMM_WORLD.Send(intbuf, 6, MPI_INT, rank, 0);
+		MPI::COMM_WORLD.Send(dbuf, 7, MPI_DOUBLE, rank, 0);
 
-	if (param->nr_weight > 0) {
-		MPI::COMM_WORLD.Send(param->weight_label, param->nr_weight, MPI_INT, rank, 0);
-		MPI::COMM_WORLD.Send(param->weight, param->nr_weight, MPI_DOUBLE, rank, 0);
+		if (param->nr_weight > 0) {
+			MPI::COMM_WORLD.Send(param->weight_label, param->nr_weight, MPI_INT, rank, 0);
+			MPI::COMM_WORLD.Send(param->weight, param->nr_weight, MPI_DOUBLE, rank, 0);
+		}
 	}
 }
 
@@ -1953,15 +1958,21 @@ spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double 
 		double costs[2];
 		costs[0] = Cp;
 		costs[1] = Cn;
-		MPI::COMM_WORLD.Send(costs, 2, MPI_DOUBLE, rank, 0);
+		{
+			std::lock_guard<std::mutex> guard(SEND_MPI_LOCK);
+			MPI::COMM_WORLD.Send(costs, 2, MPI_DOUBLE, rank, 0);
+		}
 
 		decision_function rc;
 		rc.alpha = new double [l];
 
 		MPI::Status status; 
 		// get the results from the MPI task
-		MPI::COMM_WORLD.Recv(rc.alpha, l, MPI_DOUBLE, rank, 0, status);
-		MPI::COMM_WORLD.Recv(&rc.rho, 1, MPI_DOUBLE, rank, 0, status);
+		{
+			std::lock_guard<std::mutex> guard(RECV_MPI_LOCK);
+			MPI::COMM_WORLD.Recv(rc.alpha, l, MPI_DOUBLE, rank, 0, status);
+			MPI::COMM_WORLD.Recv(&rc.rho, 1, MPI_DOUBLE, rank, 0, status);
+		}
 
 		result->set_value(rc);
 
