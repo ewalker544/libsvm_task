@@ -16,7 +16,6 @@ void exit_with_help()
 	printf(
 	"Usage: svm-train [options] training_set_file [model_file]\n"
 	"options:\n"
-	"-M : enable MPI integration\n"
 	"-s svm_type : set type of SVM (default 0)\n"
 	"	0 -- C-SVC		(multi-class classification)\n"
 	"	1 -- nu-SVC		(multi-class classification)\n"
@@ -108,7 +107,10 @@ int main(int argc, char **argv)
 		my_rank = MPI::COMM_WORLD.Get_rank();
 		world_size = MPI::COMM_WORLD.Get_size();
 
-		svm_mpi_setup(my_rank, world_size, &prob);
+		if (svm_mpi_setup(my_rank, world_size, &prob) == -1) {
+			std::cerr << "MPI setup error\n";
+			exit(1);
+		}
 	}
 
 	if (my_rank == 0) {
@@ -212,7 +214,7 @@ void parse_command_line(int argc, char **argv, char *input_file_name, char *mode
 	param.weight = NULL;
 	cross_validation = 0;
 
-	param.MPI_flag = 0;
+	param.MPI_flag = 1;
 
 	// parse options
 	for(i=1;i<argc;i++)

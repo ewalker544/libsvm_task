@@ -76,7 +76,7 @@ struct svm_model
 				/* 0 if svm_model is created by svm_train */
 };
 
-void svm_mpi_setup(int rank, int world_size, const svm_problem *prob);
+int svm_mpi_setup(int rank, int world_size, const svm_problem *prob);
 void svm_mpi_shutdown(int rank, int world_size);
 struct svm_model *svm_train(const struct svm_problem *prob, const struct svm_parameter *param);
 void svm_cross_validation(const struct svm_problem *prob, const struct svm_parameter *param, int nr_fold, double *target);

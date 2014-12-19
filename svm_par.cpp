@@ -2202,83 +2202,95 @@ static void svm_binary_svc_probability(
 	const svm_problem *prob, const svm_parameter *param,
 	double Cp, double Cn, double& probA, double& probB)
 {
-	int i;
 	int nr_fold = 5;
 	int *perm = Malloc(int,prob->l);
 	double *dec_values = Malloc(double,prob->l);
 
 	// random shuffle
-	for(i=0;i<prob->l;i++) perm[i]=i;
-	for(i=0;i<prob->l;i++)
+	for(int i=0;i<prob->l;i++) perm[i]=i;
+	for(int i=0;i<prob->l;i++)
 	{
 		int j = i+rand()%(prob->l-i);
 		swap(perm[i],perm[j]);
 	}
-	for(i=0;i<nr_fold;i++)
+
+	typedef std::pair<std::function<void(void *)>, void *> work_item;
+	std::vector<work_item> work_items;
+
+	for(int i=0;i<nr_fold;i++)
 	{
-		int begin = i*prob->l/nr_fold;
-		int end = (i+1)*prob->l/nr_fold;
-		int j,k;
-		struct svm_problem subprob;
+		auto func = [=, &dec_values](void *null) {
+			int begin = i*prob->l/nr_fold;
+			int end = (i+1)*prob->l/nr_fold;
+			struct svm_problem subprob;
 
-		subprob.l = prob->l-(end-begin);
-		subprob.x = Malloc(struct svm_node*,subprob.l);
-		subprob.y = Malloc(double,subprob.l);
+			subprob.l = prob->l-(end-begin);
+			subprob.x = Malloc(struct svm_node*,subprob.l);
+			subprob.y = Malloc(double,subprob.l);
 			
-		k=0;
-		for(j=0;j<begin;j++)
-		{
-			subprob.x[k] = prob->x[perm[j]];
-			subprob.y[k] = prob->y[perm[j]];
-			++k;
-		}
-		for(j=end;j<prob->l;j++)
-		{
-			subprob.x[k] = prob->x[perm[j]];
-			subprob.y[k] = prob->y[perm[j]];
-			++k;
-		}
-		int p_count=0,n_count=0;
-		for(j=0;j<k;j++)
-			if(subprob.y[j]>0)
-				p_count++;
-			else
-				n_count++;
-
-		if(p_count==0 && n_count==0)
-			for(j=begin;j<end;j++)
-				dec_values[perm[j]] = 0;
-		else if(p_count > 0 && n_count == 0)
-			for(j=begin;j<end;j++)
-				dec_values[perm[j]] = 1;
-		else if(p_count == 0 && n_count > 0)
-			for(j=begin;j<end;j++)
-				dec_values[perm[j]] = -1;
-		else
-		{
-			svm_parameter subparam = *param;
-			subparam.probability=0;
-			subparam.C=1.0;
-			subparam.nr_weight=2;
-			subparam.weight_label = Malloc(int,2);
-			subparam.weight = Malloc(double,2);
-			subparam.weight_label[0]=+1;
-			subparam.weight_label[1]=-1;
-			subparam.weight[0]=Cp;
-			subparam.weight[1]=Cn;
-			struct svm_model *submodel = svm_train(&subprob,&subparam);
-			for(j=begin;j<end;j++)
+			int k=0;
+			for(int j=0;j<begin;j++)
 			{
-				svm_predict_values(submodel,prob->x[perm[j]],&(dec_values[perm[j]]));
-				// ensure +1 -1 order; reason not using CV subroutine
-				dec_values[perm[j]] *= submodel->label[0];
-			}		
-			svm_free_and_destroy_model(&submodel);
-			svm_destroy_param(&subparam);
-		}
-		free(subprob.x);
-		free(subprob.y);
+				subprob.x[k] = prob->x[perm[j]];
+				subprob.y[k] = prob->y[perm[j]];
+				++k;
+			}
+			for(int j=end;j<prob->l;j++)
+			{
+				subprob.x[k] = prob->x[perm[j]];
+				subprob.y[k] = prob->y[perm[j]];
+				++k;
+			}
+			int p_count=0,n_count=0;
+			for(int j=0;j<k;j++)
+				if(subprob.y[j]>0)
+					p_count++;
+				else
+					n_count++;
+
+			if(p_count==0 && n_count==0)
+				for(int j=begin;j<end;j++)
+					dec_values[perm[j]] = 0;
+			else if(p_count > 0 && n_count == 0)
+				for(int j=begin;j<end;j++)
+					dec_values[perm[j]] = 1;
+			else if(p_count == 0 && n_count > 0)
+				for(int j=begin;j<end;j++)
+					dec_values[perm[j]] = -1;
+			else
+			{
+				svm_parameter subparam = *param;
+				subparam.probability=0;
+				subparam.C=1.0;
+				subparam.nr_weight=2;
+				subparam.weight_label = Malloc(int,2);
+				subparam.weight = Malloc(double,2);
+				subparam.weight_label[0]=+1;
+				subparam.weight_label[1]=-1;
+				subparam.weight[0]=Cp;
+				subparam.weight[1]=Cn;
+				struct svm_model *submodel = svm_train(&subprob,&subparam);
+				for(int j=begin;j<end;j++)
+				{
+					svm_predict_values(submodel,prob->x[perm[j]],&(dec_values[perm[j]]));
+					// ensure +1 -1 order; reason not using CV subroutine
+					dec_values[perm[j]] *= submodel->label[0];
+				}		
+				svm_free_and_destroy_model(&submodel);
+				svm_destroy_param(&subparam);
+			}
+
+			free(subprob.x);
+			free(subprob.y);
+		};
+		// Add this work item to my work item vector
+		work_items.push_back(std::make_pair(func, nullptr));
 	}		
+
+	SvmThreads *threads = SvmThreads::getInstance();
+	// Run all the work items in the thread pool
+	threads->run_workers(work_items);
+
 	sigmoid_train(prob->l,dec_values,prob->y,probA,probB);
 	free(dec_values);
 	free(perm);
@@ -2398,11 +2410,11 @@ static void svm_group_classes(const svm_problem *prob, int *nr_class_ret, int **
 // Interface functions
 //
 
-void svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
+int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 {
 	if (world_size < 2) {
 		std::cerr << "svm_mpi_setup: sorry world size must be greater than 1\n";
-		return;
+		return -1;
 	}
 
 	for (int i = 0; i < prob->l; ++i) {
@@ -2429,6 +2441,8 @@ void svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 		std::thread server(func);
 		server.join();
 	}
+
+	return 0;
 }
 
 void svm_mpi_shutdown(int rank, int world_size)
@@ -2793,28 +2807,29 @@ void svm_cross_validation(const svm_problem *prob, const svm_parameter *param, i
 
 	for(int i=0;i<nr_fold;i++)
 	{
-		int begin = fold_start[i];
-		int end = fold_start[i+1];
-		struct svm_problem subprob;
-
-		subprob.l = l-(end-begin);
-		subprob.x = Malloc(struct svm_node*,subprob.l);
-		subprob.y = Malloc(double,subprob.l);
-			
-		int k=0;
-		for(int j=0;j<begin;j++)
-		{
-			subprob.x[k] = prob->x[perm[j]];
-			subprob.y[k] = prob->y[perm[j]];
-			++k;
-		}
-		for(int j=end;j<l;j++)
-		{
-			subprob.x[k] = prob->x[perm[j]];
-			subprob.y[k] = prob->y[perm[j]];
-			++k;
-		}
 		auto func = [=, &target] (void *null) {
+			int begin = fold_start[i];
+			int end = fold_start[i+1];
+			struct svm_problem subprob;
+
+			subprob.l = l-(end-begin);
+			subprob.x = Malloc(struct svm_node*,subprob.l);
+			subprob.y = Malloc(double,subprob.l);
+			
+			int k=0;
+			for(int j=0;j<begin;j++)
+			{
+				subprob.x[k] = prob->x[perm[j]];
+				subprob.y[k] = prob->y[perm[j]];
+				++k;
+			}
+			for(int j=end;j<l;j++)
+			{
+				subprob.x[k] = prob->x[perm[j]];
+				subprob.y[k] = prob->y[perm[j]];
+				++k;
+			}
+
 			struct svm_model *submodel = svm_train(&subprob,param);
 			if(param->probability && 
 		   		(param->svm_type == C_SVC || param->svm_type == NU_SVC))
@@ -2832,10 +2847,12 @@ void svm_cross_validation(const svm_problem *prob, const svm_parameter *param, i
 			free(subprob.y);
 		};
 
+		// Add this work item to my vector of work items
 		work_items.push_back(std::make_pair(func, nullptr));
 	}		
 
 	SvmThreads *threads = SvmThreads::getInstance();
+	// Run all my work items in the thread pool
 	threads->run_workers(work_items);
 
 	free(fold_start);
