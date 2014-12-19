@@ -16,9 +16,9 @@
 #include <stdint.h>
 #include <mpi.h>
 #include <thread>
-#include <future>
 
 #include "ThreadPool/MPITaskPool.h"
+#include "ThreadPool/TaskPromise.h"
 
 MPITaskPool *TASK_POOL = NULL;
 std::unordered_map<svm_node *, int> SVM_NODE_MAP;
@@ -1939,10 +1939,10 @@ svm_parameter *recv_param(int rank)
 }
 
 
-std::shared_ptr<std::promise<decision_function>> 
+std::shared_ptr<TaskPromise<decision_function>> 
 spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
 {
-	std::shared_ptr<std::promise<decision_function>> result(new std::promise<decision_function>());
+	std::shared_ptr<TaskPromise<decision_function>> result(new TaskPromise<decision_function>());
 
 	auto func = [&] (int rank) {
 		int l = prob->l;
@@ -2586,10 +2586,10 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 					if (!param->MPI_flag) {
 						f[p] = svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
 					} else {	
-						std::shared_ptr<std::promise<decision_function>> pf = 
+						std::shared_ptr<TaskPromise<decision_function>> pf = 
 							spawn_svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
 
-						f[p] = pf->get_future().get();
+						f[p] = pf->get();
 					}
 
 					for(int k=0;k<ci;k++)
