@@ -1870,7 +1870,8 @@ svm_problem *recv_problem(svm_node **x, int rank)
 void send_param(const svm_parameter *param, int rank) 
 {
 	// Send the ints 
-    int intbuf[6];	
+    const int intbuf_max = 6; 
+	int intbuf[intbuf_max];	
 	intbuf[0] = param->svm_type;
 	intbuf[1] = param->kernel_type;
 	intbuf[2] = param->degree;
@@ -1879,7 +1880,8 @@ void send_param(const svm_parameter *param, int rank)
 	intbuf[5] = param->probability;
 
 	// send the doubles
-	double dbuf[7];
+	const int dbuf_max = 7;
+	double dbuf[dbuf_max];
 	dbuf[0] = param->gamma;
 	dbuf[1] = param->coef0;
 	dbuf[2] = param->cache_size;
@@ -1890,8 +1892,8 @@ void send_param(const svm_parameter *param, int rank)
 
 	{
 		std::lock_guard<std::mutex> guard(SEND_MPI_LOCK);
-		MPI::COMM_WORLD.Send(intbuf, 6, MPI_INT, rank, 0);
-		MPI::COMM_WORLD.Send(dbuf, 7, MPI_DOUBLE, rank, 0);
+		MPI::COMM_WORLD.Send(intbuf, intbuf_max, MPI_INT, rank, 0);
+		MPI::COMM_WORLD.Send(dbuf, dbuf_max, MPI_DOUBLE, rank, 0);
 
 		if (param->nr_weight > 0) {
 			MPI::COMM_WORLD.Send(param->weight_label, param->nr_weight, MPI_INT, rank, 0);
@@ -2504,6 +2506,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 		model->sv_indices = Malloc(int,nSV);
 		int j = 0;
 		for(i=0;i<prob->l;i++)
+		{
 			if(fabs(f.alpha[i]) > 0)
 			{
 				model->SV[j] = prob->x[i];
@@ -2511,6 +2514,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 				model->sv_indices[j] = i+1;
 				++j;
 			}		
+		}
 
 		free(f.alpha);
 	}
