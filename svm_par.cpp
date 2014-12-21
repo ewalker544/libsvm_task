@@ -2137,7 +2137,7 @@ spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double 
 		}
 
 		decision_function f;
-		f.alpha = new double [l];
+		f.alpha = Malloc(double, l);
 
 		MPI::Request request;
 		MPI::Status status; 
@@ -2189,6 +2189,8 @@ int do_svm_train_one(svm_node **x, int rank)
 
 
 	// Free resources
+	free(f.alpha);
+
 	free(prob->x);
 	free(prob->y);
 	free(prob);
