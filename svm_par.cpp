@@ -2104,7 +2104,7 @@ class LocalProcessor
 		std::atomic<bool> done_flag;
 };
 
-LocalProcessor LOCAL_PROCESSOR;
+LocalProcessor *LOCAL_PROCESSOR = NULL;
 
 decision_function
 spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
@@ -2115,8 +2115,8 @@ spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double 
 
 		if (rank == 0) {
 			//std::cerr << "LOCAL PROCESSOR: start\n";
-			LOCAL_PROCESSOR.trigger(prob, param, Cp, Cn);
-			decision_function f = LOCAL_PROCESSOR.get_result();
+			LOCAL_PROCESSOR->trigger(prob, param, Cp, Cn);
+			decision_function f = LOCAL_PROCESSOR->get_result();
 			//std::cerr << "LOCAL PROCESSOR: complete \n";
 			result->set_value(f);
 			return ;
@@ -2616,15 +2616,10 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 		SVM_NODE_MAP.insert(std::make_pair(prob->x[i], i));	
 	}
 
-	bool use_local = false; // default is to not use the local processor for the SMO solver
-	char *env_p = std::getenv("SVM_USE_LOCAL_PROCESSOR"); // use the local processor for the SMO solver
-	if (env_p != NULL)
-		use_local = true;
-
-	TASK_POOL = new MPITaskPool(world_size, use_local);
-
 	// Synchronize
 	MPI::COMM_WORLD.Barrier();
+
+
 
 	if (rank != 0) {
 		auto func = [&]() { // MPI task just waits to perform svm_train_one
@@ -2640,10 +2635,27 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 
 		std::thread server(func);
 		server.join();
-	} else {
+
+	} else { // root (master) node
+
+		bool use_local = false; // default is to not use the local processor for the SMO solver
+		char *env_p = std::getenv("SVM_USE_LOCAL_PROCESSOR"); // use the local processor for the SMO solver
+		if (env_p != NULL) {
+			std::cout << "Using master node as SMO solver\n";
+			use_local = true;
+		}
+
+		TASK_POOL = new MPITaskPool(world_size, use_local);
+
 		std::thread processor(recv_message_processor);
 		processor.detach();
-		LOCAL_PROCESSOR.spawn();
+
+		if (use_local) {
+			LOCAL_PROCESSOR = new LocalProcessor();
+			LOCAL_PROCESSOR->spawn();
+		} else {
+			LOCAL_PROCESSOR = NULL;
+		}
 	}
 
 	return 0;
@@ -2653,11 +2665,17 @@ void svm_mpi_shutdown(int rank, int world_size)
 {
 	if (rank == 0) {
 		RECV_PROCESSOR_STOP = true;
-		LOCAL_PROCESSOR.shutdown();
+		if (LOCAL_PROCESSOR) {
+			LOCAL_PROCESSOR->shutdown();
+			delete LOCAL_PROCESSOR;
+		}
 
 		int command = -1;
 		for (int i = 1; i < world_size; ++i)
 			MPI::COMM_WORLD.Send(&command, 1, MPI_INT, i, 0);
+
+		if (TASK_POOL)
+			delete TASK_POOL;
 	}
 }
 
