@@ -8,8 +8,7 @@
 #include <limits.h>
 #include <locale.h>
 #include "svm.h"
-#include "ThreadPool/SvmThreads.h"
-#include "ThreadPool/CachePool.h"
+
 #include <iostream>
 #include <unordered_map>
 #include <utility>
@@ -17,12 +16,23 @@
 #include <mpi.h>
 #include <thread>
 
+#include <memory>
+#include <chrono>
+#include <atomic>
+
+#include "ThreadPool/SvmThreads.h"
+#include "ThreadPool/CachePool.h"
 #include "ThreadPool/MPITaskPool.h"
 #include "ThreadPool/TaskPromise.h"
+#include "ThreadPool/TQueue.h"
+
+std::atomic<bool> RECV_PROCESSOR_STOP(false);
 
 MPITaskPool *TASK_POOL = NULL;
+
 std::mutex 	SEND_MPI_LOCK;
 std::mutex 	RECV_MPI_LOCK;
+
 std::unordered_map<svm_node *, int> SVM_NODE_MAP;
 
 int libsvm_version = LIBSVM_VERSION;
@@ -1986,6 +1996,124 @@ spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double 
 	return result; // return promise so main thread can wait for MPI task to be completed
 }
 
+struct pending_decision {
+	decision_function decision;
+	MPI::Request request;
+	int rank;
+	std::shared_ptr<TaskPromise<decision_function>> result;
+};
+
+TQueue<pending_decision> PENDING_DECISION_QUEUE;
+
+void recv_message_processor()
+{
+	size_t request_size = 100;
+	MPI::Request *requests = new MPI::Request[request_size];
+
+	std::vector<pending_decision> decisions;
+
+	while ( !RECV_PROCESSOR_STOP )
+	{
+		int index;
+		bool flag;
+
+		while (!PENDING_DECISION_QUEUE.empty()) {
+			decisions.push_back(PENDING_DECISION_QUEUE.dequeue());
+		}
+
+		if (decisions.empty()) { // nothing to process right now
+			std::chrono::milliseconds dura(100); // 100 ms == 0.1 secs
+			std::this_thread::sleep_for(dura);
+			continue;
+		}
+
+		if (decisions.size() >= request_size) {
+			delete [] requests;
+			request_size += 100;
+			requests = new MPI::Request[request_size];
+		}
+
+		int count = int(decisions.size());
+		for (int i = 0; i < count; ++i) {
+			requests[i] = decisions[i].request;
+		}
+
+		flag = MPI::Request::Testany(count, requests, index);
+
+		if (flag && index != MPI_UNDEFINED) {
+			MPI::Status status;
+
+			{
+				std::lock_guard<std::mutex> guard(RECV_MPI_LOCK);
+				// Recv the rho value from decision[index].rank to complete the svm_train_one() invocation
+				//std::cerr << "Recv --> " << decisions[index].rank << std::endl;
+				MPI::COMM_WORLD.Recv(&decisions[index].decision.rho, 1, MPI_DOUBLE, decisions[index].rank, 0, status);
+			}
+
+			// at this point, decisions[index].decision is ready for consumption
+			decisions[index].result->set_value(decisions[index].decision);
+
+			auto pos = decisions.begin() + index; // get the iterator for this index pos
+			decisions.erase(pos);  // erase it from the vector
+			continue;
+		} 
+
+		std::chrono::milliseconds dura(100);
+		std::this_thread::sleep_for(dura);
+	}
+
+	delete [] requests;
+}
+
+decision_function
+spawn_svm_train_one2(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
+{
+	std::shared_ptr<TaskPromise<decision_function>> result(new TaskPromise<decision_function>());
+
+	auto func = [&] (int rank) {
+		int l = prob->l;
+
+		// Send parameters to MPI task
+		send_problem(prob, rank);
+		send_param(param, rank);
+		double costs[2];
+		costs[0] = Cp;
+		costs[1] = Cn;
+		{
+			std::lock_guard<std::mutex> guard(SEND_MPI_LOCK);
+			MPI::COMM_WORLD.Send(costs, 2, MPI_DOUBLE, rank, 0);
+		}
+
+		decision_function f;
+		f.alpha = new double [l];
+
+		MPI::Request request;
+		MPI::Status status; 
+		// get the results from the MPI task
+		{
+			std::lock_guard<std::mutex> guard(RECV_MPI_LOCK);
+			//std::cerr << "Irecv --> " << rank << std::endl;
+			request = MPI::COMM_WORLD.Irecv(f.alpha, l, MPI_DOUBLE, rank, 0);
+		}
+
+		pending_decision pf;
+		pf.decision = f;
+		pf.request = request;
+		pf.rank = rank;
+		pf.result = result;
+
+		PENDING_DECISION_QUEUE.push(pf);
+
+		result->get(); // occupy this MPI node until we get a result
+
+		return;
+	};
+
+	TASK_POOL->enqueue(func); // send it to an MPI task for solving
+
+	return result->get(); 
+}
+
 int do_svm_train_one(svm_node **x, int rank)
 {
 	// Get the parameters for work
@@ -2441,11 +2569,11 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 
 	if (rank != 0) {
 		auto func = [&]() { // MPI task just waits to perform svm_train_one
-			std::cout << "MPI task " << rank << ": waiting for requests\n";
+			//std::cout << "MPI task " << rank << ": waiting for requests\n";
 			while (true) 
 			{
 				if (do_svm_train_one(prob->x, 0) == -1) {
-					std::cout << "MPI task " << rank << ": goodbye\n";
+					//std::cout << "MPI task " << rank << ": goodbye\n";
 					break;
 				}
 			}
@@ -2453,6 +2581,9 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 
 		std::thread server(func);
 		server.join();
+	} else {
+		std::thread processor(recv_message_processor);
+		processor.detach();
 	}
 
 	return 0;
@@ -2461,6 +2592,8 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 void svm_mpi_shutdown(int rank, int world_size)
 {
 	if (rank == 0) {
+		RECV_PROCESSOR_STOP = true;
+
 		int command = -1;
 		for (int i = 1; i < world_size; ++i)
 			MPI::COMM_WORLD.Send(&command, 1, MPI_INT, i, 0);
@@ -2601,10 +2734,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 					if (!param->MPI_flag) {
 						f[p] = svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
 					} else {	
-						std::shared_ptr<TaskPromise<decision_function>> pf = 
-							spawn_svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
-
-						f[p] = pf->get();
+						f[p] = spawn_svm_train_one2(&sub_prob,param,weighted_C[i],weighted_C[j]);
 					}
 
 					for(int k=0;k<ci;k++)
@@ -2873,7 +3003,6 @@ void svm_cross_validation(const svm_problem *prob, const svm_parameter *param, i
 	free(fold_start);
 	free(perm);
 }
-
 
 int svm_get_svm_type(const svm_model *model)
 {

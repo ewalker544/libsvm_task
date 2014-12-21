@@ -17,20 +17,22 @@ class TaskPromise
 		TaskPromise() : set_flag(false) {}
 
 		void set_value(T &v) {
-			std::unique_lock<std::mutex> guard(lock);	
+			{
+				std::unique_lock<std::mutex> guard(lock);	
+				value = v;
+				set_flag = true;
+			}
 
-			value = v;
-
-			set_flag = true;
-
+			/** 
+			 * "The notifying thread does not need to hold the lock on the same mutex as the one held by the 
+			 * waiting thread(s); in fact doing so is a pessimization ..." - cppreference.com
+			 */
 			condition.notify_all(); // notify all the waiting get() calls
 		}
 
 		T get() {
 			std::unique_lock<std::mutex> guard(lock);
-
 			condition.wait(guard, [this] { return this->set_flag; }); // block until notified
-
 			return value;
 		}
 
