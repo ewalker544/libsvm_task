@@ -1981,7 +1981,7 @@ void recv_message_processor()
 		}
 
 		if (decisions.empty()) { // nothing to process right now
-			std::chrono::milliseconds dura(100); // 100 ms == 0.1 secs
+			std::chrono::milliseconds dura(1000); // 1000 ms == 1.0 secs
 			std::this_thread::sleep_for(dura);
 			continue;
 		}
@@ -2017,12 +2017,93 @@ void recv_message_processor()
 			continue;
 		} 
 
-		std::chrono::milliseconds dura(100);
+		std::chrono::milliseconds dura(1000);
 		std::this_thread::sleep_for(dura);
 	}
 
 	delete [] requests;
 }
+
+class LocalProcessor
+{
+	public:
+		LocalProcessor() : start_flag(false), complete_flag(false), done_flag(false) {}
+
+		void trigger(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
+		{
+			{
+				std::lock_guard<std::mutex> guard(end_lock);
+				complete_flag = false;
+			}
+			{
+				std::lock_guard<std::mutex> guard(start_lock);
+				this->prob = const_cast<svm_problem *>(prob);
+				this->param = const_cast<svm_parameter *>(param);
+				this->Cp = Cp;
+				this->Cn = Cn;
+				start_flag = true;
+			}
+			start_cv.notify_one();
+		}
+
+		void spawn() 
+		{
+			auto func = [this] () {
+				while (!this->done_flag) 
+				{
+					{
+						std::unique_lock<std::mutex> start_guard(this->start_lock);
+						this->start_cv.wait(start_guard, [this] {return this->done_flag || this->start_flag;});
+
+						if (this->done_flag)
+							break;
+
+						this->start_flag = false;
+						this->f = svm_train_one(this->prob, this->param, this->Cp, this->Cn);
+					}
+
+					{
+						std::lock_guard<std::mutex> end_guard(this->end_lock);
+						this->complete_flag = true;
+					}
+					
+					end_cv.notify_all();
+				}
+			};
+
+			std::thread processor(func);
+			processor.detach();
+		}
+
+		decision_function get_result() {
+			std::unique_lock<std::mutex> end_guard(end_lock);
+			end_cv.wait(end_guard, [this] {return this->complete_flag;});			
+			return f;
+		}
+
+		void shutdown()
+		{
+			done_flag = true;
+			start_cv.notify_all();
+		}
+
+	private:
+		std::mutex start_lock;
+		std::condition_variable start_cv;
+		std::mutex end_lock;
+		std::condition_variable end_cv;
+
+		svm_problem *prob;
+		svm_parameter *param;
+		double Cp, Cn;
+
+		decision_function f;
+		bool start_flag;
+		bool complete_flag;
+		std::atomic<bool> done_flag;
+};
+
+LocalProcessor LOCAL_PROCESSOR;
 
 decision_function
 spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
@@ -2030,6 +2111,17 @@ spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double 
 	std::shared_ptr<TaskPromise<decision_function>> result(new TaskPromise<decision_function>());
 
 	auto func = [&] (int rank) {
+
+		if (rank == 0) {
+			//std::cerr << "LOCAL PROCESSOR: start\n";
+			LOCAL_PROCESSOR.trigger(prob, param, Cp, Cn);
+			decision_function f = LOCAL_PROCESSOR.get_result();
+			//std::cerr << "LOCAL PROCESSOR: complete \n";
+			result->set_value(f);
+			return ;
+		} 
+
+		// Any other rank
 		int l = prob->l;
 
 		// Send parameters to MPI task
@@ -2521,7 +2613,7 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 		SVM_NODE_MAP.insert(std::make_pair(prob->x[i], i));	
 	}
 
-	TASK_POOL = new MPITaskPool(world_size - 1);
+	TASK_POOL = new MPITaskPool(world_size);
 
 	// Synchronize
 	MPI::COMM_WORLD.Barrier();
@@ -2543,6 +2635,7 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 	} else {
 		std::thread processor(recv_message_processor);
 		processor.detach();
+		LOCAL_PROCESSOR.spawn();
 	}
 
 	return 0;
@@ -2552,6 +2645,7 @@ void svm_mpi_shutdown(int rank, int world_size)
 {
 	if (rank == 0) {
 		RECV_PROCESSOR_STOP = true;
+		LOCAL_PROCESSOR.shutdown();
 
 		int command = -1;
 		for (int i = 1; i < world_size; ++i)

@@ -21,7 +21,7 @@ public:
 	{
 		// Spawn workers
 		for (int i = 0; i < threads; ++i) {
-			workers.push_back(std::thread(Worker(*this, i+1)));
+			workers.push_back(std::thread(Worker(*this, i)));
 		}
 	}
 
