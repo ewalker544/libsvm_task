@@ -1955,47 +1955,6 @@ svm_parameter *recv_param(int rank)
 	return param;
 }
 
-
-std::shared_ptr<TaskPromise<decision_function>> 
-spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
-{
-	std::shared_ptr<TaskPromise<decision_function>> result(new TaskPromise<decision_function>());
-
-	auto func = [&] (int rank) {
-		int l = prob->l;
-
-		// Send parameters to MPI task
-		send_problem(prob, rank);
-		send_param(param, rank);
-		double costs[2];
-		costs[0] = Cp;
-		costs[1] = Cn;
-		{
-			std::lock_guard<std::mutex> guard(SEND_MPI_LOCK);
-			MPI::COMM_WORLD.Send(costs, 2, MPI_DOUBLE, rank, 0);
-		}
-
-		decision_function rc;
-		rc.alpha = new double [l];
-
-		MPI::Status status; 
-		// get the results from the MPI task
-		{
-			std::lock_guard<std::mutex> guard(RECV_MPI_LOCK);
-			MPI::COMM_WORLD.Recv(rc.alpha, l, MPI_DOUBLE, rank, 0, status);
-			MPI::COMM_WORLD.Recv(&rc.rho, 1, MPI_DOUBLE, rank, 0, status);
-		}
-
-		result->set_value(rc);
-
-		return ;
-	};
-
-	TASK_POOL->enqueue(func); // send it to an MPI task for solving
-
-	return result; // return promise so main thread can wait for MPI task to be completed
-}
-
 struct pending_decision {
 	decision_function decision;
 	MPI::Request request;
@@ -2066,7 +2025,7 @@ void recv_message_processor()
 }
 
 decision_function
-spawn_svm_train_one2(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
+spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
 {
 	std::shared_ptr<TaskPromise<decision_function>> result(new TaskPromise<decision_function>());
 
@@ -2734,7 +2693,7 @@ svm_model *svm_train(const svm_problem *prob, const svm_parameter *param)
 					if (!param->MPI_flag) {
 						f[p] = svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
 					} else {	
-						f[p] = spawn_svm_train_one2(&sub_prob,param,weighted_C[i],weighted_C[j]);
+						f[p] = spawn_svm_train_one(&sub_prob,param,weighted_C[i],weighted_C[j]);
 					}
 
 					for(int k=0;k<ci;k++)
