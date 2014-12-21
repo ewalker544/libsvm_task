@@ -17,10 +17,13 @@
 class MPITaskPool {
 public:
 
-	MPITaskPool (int threads) : stop(false) 
+	MPITaskPool (int threads, bool use_local) : stop(false) 
 	{
 		// Spawn workers
-		for (int i = 0; i < threads; ++i) {
+		int start = 1;
+		if (use_local)
+			start = 0;
+		for (int i = start; i < threads; ++i) {
 			workers.push_back(std::thread(Worker(*this, i)));
 		}
 	}

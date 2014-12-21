@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <mpi.h>
 #include <thread>
+#include <cstdlib>
 
 #include <memory>
 #include <chrono>
@@ -2613,7 +2614,12 @@ int svm_mpi_setup(int rank, int world_size, const svm_problem *prob)
 		SVM_NODE_MAP.insert(std::make_pair(prob->x[i], i));	
 	}
 
-	TASK_POOL = new MPITaskPool(world_size);
+	bool use_local = false; // default is to not use the local processor for the SMO solver
+	char *env_p = std::getenv("SVM_USE_LOCAL_PROCESSOR"); // use the local processor for the SMO solver
+	if (env_p != NULL)
+		use_local = true;
+
+	TASK_POOL = new MPITaskPool(world_size, use_local);
 
 	// Synchronize
 	MPI::COMM_WORLD.Barrier();
