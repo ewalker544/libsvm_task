@@ -2033,10 +2033,7 @@ class LocalProcessor
 		void trigger(const svm_problem *prob, const svm_parameter *param, double Cp, double Cn)
 		{
 			{
-				std::lock_guard<std::mutex> guard(end_lock);
-				complete_flag = false;
-			}
-			{
+				// set up the parameters for the SMO solver
 				std::lock_guard<std::mutex> guard(start_lock);
 				this->prob = const_cast<svm_problem *>(prob);
 				this->param = const_cast<svm_parameter *>(param);
@@ -2049,25 +2046,30 @@ class LocalProcessor
 
 		void spawn() 
 		{
+			// SMO solver
 			auto func = [this] () {
 				while (!this->done_flag) 
 				{
 					{
 						std::unique_lock<std::mutex> start_guard(this->start_lock);
+						// Wait for a trigger to begin solving, or exit
 						this->start_cv.wait(start_guard, [this] {return this->done_flag || this->start_flag;});
 
-						if (this->done_flag)
+						if (this->done_flag) // it is time to exit
 							break;
 
+						// begin solving
 						this->start_flag = false;
 						this->f = svm_train_one(this->prob, this->param, this->Cp, this->Cn);
 					}
 
 					{
+						// indicate that we have finished solving
 						std::lock_guard<std::mutex> end_guard(this->end_lock);
 						this->complete_flag = true;
 					}
 					
+					// notify any thread waiting for the result
 					end_cv.notify_all();
 				}
 			};
@@ -2076,9 +2078,15 @@ class LocalProcessor
 			processor.detach();
 		}
 
-		decision_function get_result() {
+		decision_function get_result() 
+		{
 			std::unique_lock<std::mutex> end_guard(end_lock);
-			end_cv.wait(end_guard, [this] {return this->complete_flag;});			
+			
+			while (!complete_flag) { // check if solution is ready
+				end_cv.wait(end_guard); // wait until we are noitified that a solution is ready
+			}
+
+			complete_flag = false;
 			return f;
 		}
 
@@ -2115,10 +2123,12 @@ spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double 
 
 		if (rank == 0) {
 			//std::cerr << "LOCAL PROCESSOR: start\n";
+			
 			LOCAL_PROCESSOR->trigger(prob, param, Cp, Cn);
-			decision_function f = LOCAL_PROCESSOR->get_result();
+			// get the SMO solution result and set the promise shared state with the solution
+			result->set_value(LOCAL_PROCESSOR->get_result());
+
 			//std::cerr << "LOCAL PROCESSOR: complete \n";
-			result->set_value(f);
 			return ;
 		} 
 
@@ -2163,7 +2173,7 @@ spawn_svm_train_one(const svm_problem *prob, const svm_parameter *param, double 
 
 	TASK_POOL->enqueue(func); // send it to an MPI task for solving
 
-	return result->get(); 
+	return result->get(); // returns the solution through the promise shared state
 }
 
 int do_svm_train_one(svm_node **x, int rank)

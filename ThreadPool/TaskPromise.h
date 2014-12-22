@@ -16,7 +16,7 @@ class TaskPromise
 	public:
 		TaskPromise() : set_flag(false) {}
 
-		void set_value(T &v) {
+		void set_value(const T &v) {
 			{
 				std::unique_lock<std::mutex> guard(lock);	
 				value = v;
