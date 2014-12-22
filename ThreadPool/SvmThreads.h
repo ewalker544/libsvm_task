@@ -27,12 +27,10 @@ class SvmThreads
 			char *env_p = std::getenv("SVM_NUM_THREADS");
 			if (env_p != NULL) {
 				total_num_cpus = std::atoi(env_p);
-				total_num_cpus = ((total_num_cpus < 1) ? 16 : total_num_cpus);
 			} else {
 				total_num_cpus = std::thread::hardware_concurrency();
-				if (total_num_cpus < 1)
-					total_num_cpus = 16;
 			}
+			total_num_cpus = ((total_num_cpus < 1) ? 16 : total_num_cpus);
 
 			thrd_pool = new ThreadPool(total_num_cpus);
 		}
